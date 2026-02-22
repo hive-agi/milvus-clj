@@ -1,5 +1,5 @@
 {:project-id "milvus-clj"
  :parent "hive"
- :description "Clojure client for Milvus vector database"
- :tags ["milvus" "vector-db" "client" "foss"]
- :license "Proprietary"}
+ :description "Milvus vector database Clojure client"
+ :language :clojure
+ :tags ["milvus" "vector-db"]}
