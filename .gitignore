@@ -1,0 +1,4 @@
+.cpcache/
+.lsp/
+.clj-kondo/.cache/
+local.deps.edn
