@@ -1,6 +1,14 @@
 {:paths ["src"]
  :deps {org.clojure/clojure       {:mvn/version "1.12.0"}
-        io.milvus/milvus-sdk-java {:mvn/version "2.6.0"}
+        io.milvus/milvus-sdk-java {:mvn/version "2.6.17"}
+        ;; milvus-sdk-java grpc stubs require protobuf 4.x at runtime
+        ;; (MapField must implement MapFieldReflectionAccessor)
+        com.google.protobuf/protobuf-java {:mvn/version "4.31.1"}
+        ;; Force grpc 1.80.0 (CVE-2025-55163 fix on netty transport)
+        ;; milvus-sdk pulls 1.59.1 which is vulnerable; align all grpc modules
+        io.grpc/grpc-netty-shaded {:mvn/version "1.80.0"}
+        io.grpc/grpc-protobuf     {:mvn/version "1.80.0"}
+        io.grpc/grpc-stub         {:mvn/version "1.80.0"}
         com.taoensso/timbre       {:mvn/version "6.8.0"}
         org.clojure/data.json     {:mvn/version "2.5.1"}}
 
