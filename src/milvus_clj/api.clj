@@ -49,8 +49,9 @@
    PR-3 hybrid: the flat config carries a `:transport` selector (default
    `:grpc`). For `:grpc` we populate the `:grpc` sub-map with all the
    keepalive / idle / TLS knobs. For `:http` we populate the `:http`
-   sub-map and override `:port` from `:http-port` (REST is on 9091, not
-   gRPC's 19530, unless the caller explicitly passed `:port`)."
+   sub-map. Both transports default to port 19530 — Milvus 2.5+ serves
+   gRPC and the v2 REST API on the SAME port via the proxy. Port 9091
+   is metrics/health and returns 404 on REST calls."
   [flat]
   (let [transport (or (:transport flat) :grpc)
         common    {:transport transport
@@ -59,7 +60,7 @@
                    :database  (:database flat)}]
     (case transport
       :http (assoc common
-                   :port (or (:port flat) (:http-port flat) 9091)
+                   :port (or (:port flat) (:http-port flat) 19530)
                    :http {:request-timeout-ms (:http-request-timeout-ms flat)
                           :connect-timeout-ms (:http-connect-timeout-ms flat)})
       :grpc (assoc common

@@ -1,6 +1,11 @@
 (ns milvus-clj.transport.http
   "HTTP/REST transport for `milvus-clj.client`. Talks Milvus v2.5.x REST API
-   on port 9091 via `java.net.http.HttpClient` + `clojure.data.json`.
+   on port 19530 (yes, the same port as gRPC — Milvus 2.5+ multiplexes via
+   the proxy) via `java.net.http.HttpClient` + `clojure.data.json`.
+
+   PORT GOTCHA: do NOT use 9091. That's the metrics/health endpoint and
+   returns `404 page not found` on every REST API call. Milvus 2.5+ serves
+   gRPC and the v2 REST API on the SAME port (19530) via the proxy.
 
    Why this exists:
      - HTTP/1.1 with short-lived connections has zero idle state; the
@@ -44,7 +49,7 @@
 
 (defn- base-url
   [{:keys [host port]}]
-  (str "http://" (or host "localhost") ":" (or port 9091)))
+  (str "http://" (or host "localhost") ":" (or port 19530)))
 
 (defn- build-request
   ^java.net.http.HttpRequest [^String url ^String body opts]
@@ -391,14 +396,16 @@
 
    Reads agnostic keys (`:host`, `:port`, `:token`, `:database`) from the
    top level and HTTP-specific keys (`:request-timeout-ms`,
-   `:connect-timeout-ms`) from `(:http opts)`. Default port is 9091."
+   `:connect-timeout-ms`) from `(:http opts)`. Default port is 19530 —
+   Milvus 2.5+ multiplexes gRPC and REST on the SAME port via the proxy.
+   Do NOT use 9091, that's the metrics endpoint."
   [opts]
   (let [http (:http opts)
         {:keys [connect-timeout-ms]
          :or   {connect-timeout-ms 5000}} http
-        ;; Default HTTP port is 9091, NOT 19530.
+        ;; Default HTTP port is 19530 (proxy multiplex), NOT 9091.
         opts' (cond-> opts
-                (nil? (:port opts)) (assoc :port 9091)
+                (nil? (:port opts)) (assoc :port 19530)
                 ;; Flatten the relevant http knob into top-level for the
                 ;; request builder.
                 (:request-timeout-ms http)

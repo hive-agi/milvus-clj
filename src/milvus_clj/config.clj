@@ -40,7 +40,10 @@
                                  (keyword t)
                                  :grpc)
    ;; HTTP-specific defaults — only consulted when :transport is :http.
-   :http-port                  9091
+   ;; Milvus 2.5+ serves both gRPC AND REST on port 19530 via the proxy;
+   ;; port 9091 is the metrics/health endpoint (NOT REST). Don't change
+   ;; :http-port to 9091 — it will return 404 page not found on every call.
+   :http-port                  19530
    :http-request-timeout-ms    30000
    :http-connect-timeout-ms    5000})
 
