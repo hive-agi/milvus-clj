@@ -12,16 +12,23 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private default-config
-  {:host                  "localhost"
-   :port                  19530
-   :collection-name       "hive-mcp-memory"
-   :connect-timeout-ms    10000
-   :keep-alive-time-ms    55000
-   :keep-alive-timeout-ms 20000
-   :idle-timeout-ms       86400000
-   :secure                false
-   :token                 nil
-   :database              nil})
+  {:host                       (or (System/getenv "MILVUS_HOST") "localhost")
+   :port                       (parse-long (or (System/getenv "MILVUS_PORT") "19530"))
+   :collection-name            "hive-mcp-memory"
+   :connect-timeout-ms         10000
+   ;; Keepalive budget is tuned for fragile intermediaries (tailscale
+   ;; userspace netstack, cloud NAT). 30 s ping is short enough that
+   ;; gVisor won't consider the flow idle (default idle TCP window is
+   ;; 60-120 s). keep-alive-without-calls? is the critical bit — without
+   ;; it gRPC only pings during active RPCs, so idle clients die silently
+   ;; and the first post-idle query sees "UNAVAILABLE: Keepalive failed".
+   :keep-alive-time-ms         30000
+   :keep-alive-timeout-ms      10000
+   :keep-alive-without-calls?  true
+   :idle-timeout-ms            86400000
+   :secure                     false
+   :token                      (System/getenv "MILVUS_TOKEN")
+   :database                   nil})
 
 ;; ---------------------------------------------------------------------------
 ;; State

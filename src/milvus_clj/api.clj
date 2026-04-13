@@ -1,123 +1,94 @@
 (ns milvus-clj.api
-  "Main public API for milvus-clj, mirroring clojure-chroma-client.api.
+  "Legacy thin compat shim over `milvus-clj.client`.
 
-   All operations return futures for async compatibility with existing
-   Chroma-based code (which uses @(chroma/query ...) pattern).
+   Historical shape: a flat API of 21 functions holding a `defonce`
+   singleton MilvusServiceClient. The protocol refactor (see
+   `milvus-clj.client`) split the implementation into transport-
+   specific records under `milvus-clj.transport.*`. This ns survives
+   as a delegating layer so existing callers (hive-milvus is the sole
+   consumer) need not migrate in one PR.
 
-   Note: `get` shadows clojure.core/get intentionally — callers use it
-   as milvus/get which is unambiguous.
+   The singleton lives in `*default-client*`. `connect!` builds a
+   `GrpcClient` via `client/make` and stores it. Every op reads
+   `@default-client`, dispatches to the protocol method, and wraps
+   the return in `future` to preserve the legacy `@(milvus/...)`
+   call pattern hive-milvus depends on.
 
-   Usage:
-     (require '[milvus-clj.api :as milvus])
+   This ns will be deleted in PR-4 once all call sites migrate to
+   `milvus-clj.client/with-client`.
 
-     (milvus/connect!)
-     @(milvus/create-collection \"memories\"
-        {:schema milvus-clj.schema/memory-schema-fields
-         :index  milvus-clj.index/default-memory-index})
-     @(milvus/add \"memories\"
-        [{:id \"1\" :embedding [...] :document \"...\" :type \"note\"}])
-     @(milvus/query \"memories\"
-        {:vector [...] :limit 10 :filter \"type == 'note'\"})
-     (milvus/disconnect!)"
+   Backward compatibility notes:
+     - `connect!` / `disconnect!` / `connected?` preserve the old
+       singleton lifecycle.
+     - Every op still returns a future (deref with `@`).
+     - Config keys merged via `connect!` pass through to
+       `milvus-clj.client/make` under `{:transport :grpc}` defaults.
+     - `resolve-consistency` + `with-connection` macro preserved
+       (hive-milvus uses neither today, but external callers might)."
   (:refer-clojure :exclude [get])
   (:require [milvus-clj.config :as config]
-            [milvus-clj.schema :as schema]
-            [milvus-clj.index :as idx]
-            [clojure.data.json :as json]
-            [clojure.string :as str]
-            [taoensso.timbre :as log])
-  (:import [io.milvus.client MilvusServiceClient]
-           [io.milvus.param ConnectParam R]
-           [io.milvus.param.collection
-            CreateCollectionParam DropCollectionParam HasCollectionParam
-            LoadCollectionParam ReleaseCollectionParam
-            ShowCollectionsParam DescribeCollectionParam
-            FlushParam]
-           [io.milvus.param.dml
-            InsertParam InsertParam$Field UpsertParam
-            DeleteParam SearchParam QueryParam]
-           [io.milvus.param.index CreateIndexParam]
-           [io.milvus.response
-            SearchResultsWrapper QueryResultsWrapper
-            DescCollResponseWrapper]
-           [io.milvus.grpc DataType]
-           [java.util ArrayList]
-           [java.util.concurrent TimeUnit]))
+            [milvus-clj.client :as client]
+            [milvus-clj.transport.grpc :as grpc]))
 
 ;; ============================================================================
-;; Client lifecycle
+;; Singleton lifecycle
 ;; ============================================================================
 
-(defonce ^:private client-atom (atom nil))
-
-(defn- check-response!
-  "Validate a Milvus R<T> response. Returns data on success, throws on error.
-   The Milvus Java SDK wraps all responses in R<T> with status codes."
-  [^R response operation]
-  (if (zero? (.getStatus response))
-    (.getData response)
-    (throw (ex-info (str "Milvus " operation " failed: " (.getMessage response))
-                    {:status    (.getStatus response)
-                     :message   (.getMessage response)
-                     :exception (.getException response)
-                     :operation operation}))))
+(defonce ^:private default-client (atom nil))
 
 (defn- require-client!
-  "Get the active MilvusServiceClient or throw."
-  ^MilvusServiceClient []
-  (or @client-atom
+  "Return the live client or throw — mirrors the historical error msg."
+  []
+  (or @default-client
       (throw (ex-info "Milvus client not connected. Call (connect!) first." {}))))
 
 (defn connect!
-  "Connect to Milvus and store the client.
-   Uses config from milvus-clj.config, optionally merging override opts.
-
-   Returns the MilvusServiceClient instance.
-
-   Example:
+  "Connect to Milvus using the gRPC transport. Preserved signature:
      (connect!)
-     (connect! {:host \"milvus.prod\" :port 19530})"
-  ([]
-   (connect! {}))
+     (connect! {:host \"milvus.prod\" :port 19530})
+   Merges opts into `milvus-clj.config` (legacy flat shape) and
+   constructs a `GrpcClient` via `milvus-clj.client/make`. Returns the
+   underlying `MilvusServiceClient` for backward compat — note that
+   callers holding the old raw client reference will still work, but
+   new code should use `milvus-clj.client/with-client` + protocol
+   methods instead."
+  ([] (connect! {}))
   ([opts]
    (when (seq opts) (config/configure! opts))
-   (let [{:keys [host port connect-timeout-ms keep-alive-time-ms
-                 keep-alive-timeout-ms idle-timeout-ms
-                 secure token database]} (config/get-config)
-         builder (doto (ConnectParam/newBuilder)
-                   (.withHost host)
-                   (.withPort (int port))
-                   (.withConnectTimeout (long connect-timeout-ms) TimeUnit/MILLISECONDS)
-                   (.withKeepAliveTime (long keep-alive-time-ms) TimeUnit/MILLISECONDS)
-                   (.withKeepAliveTimeout (long keep-alive-timeout-ms) TimeUnit/MILLISECONDS)
-                   (.withIdleTimeout (long idle-timeout-ms) TimeUnit/MILLISECONDS)
-                   (.withSecure (boolean secure)))]
-     (when token    (.withToken builder token))
-     (when database (.withDatabaseName builder database))
-     (let [client (MilvusServiceClient. (.build builder))]
-       (reset! client-atom client)
-       (log/info "Connected to Milvus at" (str host ":" port))
-       client))))
+   (let [flat (config/get-config)
+         ;; Map the legacy flat config onto the new nested shape.
+         nested {:transport :grpc
+                 :host      (:host flat)
+                 :port      (:port flat)
+                 :token     (:token flat)
+                 :database  (:database flat)
+                 :grpc {:connect-timeout-ms        (:connect-timeout-ms flat)
+                        :keep-alive-time-ms        (:keep-alive-time-ms flat)
+                        :keep-alive-timeout-ms     (:keep-alive-timeout-ms flat)
+                        :keep-alive-without-calls? (:keep-alive-without-calls? flat)
+                        :idle-timeout-ms           (:idle-timeout-ms flat)
+                        :secure                    (:secure flat)}}
+         gc   ^milvus_clj.transport.grpc.GrpcClient (client/make nested)]
+     (reset! default-client gc)
+     ;; Legacy callers expect the raw MilvusServiceClient.
+     (:msc gc))))
 
 (defn disconnect!
-  "Close the Milvus client connection and release resources."
+  "Close the active client and clear the singleton. Idempotent."
   []
-  (when-let [^MilvusServiceClient client @client-atom]
-    (.close client)
-    (reset! client-atom nil)
-    (log/info "Disconnected from Milvus")))
+  (when-let [gc @default-client]
+    (client/-close gc)
+    (reset! default-client nil)))
 
 (defn connected?
-  "Check if a Milvus client is currently connected."
+  "Check if the singleton client is set."
   []
-  (some? @client-atom))
+  (some? @default-client))
 
 (defmacro with-connection
   "Execute body with a temporary Milvus connection that auto-disconnects.
-
-   Example:
-     (with-connection {:host \"localhost\" :port 19530}
-       @(list-collections))"
+   Preserved for backward compat — new code should use
+   `milvus-clj.client/with-client`."
   [opts & body]
   `(try
      (connect! ~opts)
@@ -126,411 +97,115 @@
        (disconnect!))))
 
 ;; ============================================================================
-;; Collection management
+;; Consistency (re-exported from transport/grpc so external callers keep
+;; ============================================================================
+
+(def consistency-levels
+  "Map keyword → ConsistencyLevelEnum (gRPC-only concept)."
+  grpc/consistency-levels)
+
+(defn resolve-consistency
+  "Resolve keyword to a gRPC ConsistencyLevelEnum. Nil means default."
+  [kw]
+  (grpc/resolve-consistency kw))
+
+;; ============================================================================
+;; Collection management — delegates to IMilvusAdmin + IMilvusCore + IMilvusExtras
 ;; ============================================================================
 
 (defn create-collection
-  "Create a Milvus collection with explicit schema. Returns a future.
-
-   Unlike Chroma (schemaless), Milvus requires field definitions upfront.
-   Optionally creates an index and loads the collection into memory.
-
-   Options:
-     :schema      - vector of field maps (see milvus-clj.schema)
-     :index       - index config map (see milvus-clj.index/default-memory-index)
-     :description - collection description string
-     :shards-num  - number of shards (default 1)
-
-   Example:
-     @(create-collection \"memories\"
-        {:schema milvus-clj.schema/memory-schema-fields
-         :index  milvus-clj.index/default-memory-index})"
-  [collection-name {:keys [schema index description shards-num]
-                    :or   {description "" shards-num 1}}]
-  (future
-    (let [client      (require-client!)
-          coll-schema (schema/collection-schema schema)
-          builder     (doto (CreateCollectionParam/newBuilder)
-                        (.withCollectionName collection-name)
-                        (.withSchema coll-schema)
-                        (.withShardsNum (int shards-num)))
-          _           (when (seq description)
-                        (.withDescription builder description))
-          create-param (.build builder)]
-      (check-response! (.createCollection client create-param) "createCollection")
-      (log/info "Created collection:" collection-name)
-
-      ;; Create index if specified
-      (when index
-        (let [idx-param (idx/create-index-param
-                          (assoc index :collection-name collection-name))]
-          (check-response! (.createIndex client idx-param) "createIndex")
-          (log/debug "Created index on" (:field-name index) "for" collection-name)))
-
-      ;; Load collection into memory for search
-      (let [load-param (-> (LoadCollectionParam/newBuilder)
-                           (.withCollectionName collection-name)
-                           .build)]
-        (check-response! (.loadCollection client load-param) "loadCollection")
-        (log/debug "Loaded collection into memory:" collection-name))
-
-      {:collection-name collection-name :status :created})))
+  "Create a Milvus collection with schema + optional index. Returns future.
+   See `milvus-clj.client/-create-collection`."
+  [collection-name opts]
+  (future (client/-create-collection (require-client!) collection-name opts)))
 
 (defn has-collection
-  "Check if a collection exists. Returns a future resolving to boolean."
+  "Check if a collection exists. Returns future<boolean>."
   [collection-name]
-  (future
-    (let [client (require-client!)
-          param  (-> (HasCollectionParam/newBuilder)
-                     (.withCollectionName collection-name)
-                     .build)]
-      (check-response! (.hasCollection client param) "hasCollection"))))
+  (future (client/-has-collection (require-client!) collection-name)))
 
 (defn get-collection
-  "Describe a collection's schema and properties. Returns a future.
-   Analogous to chroma/get-collection."
+  "Describe a collection's schema. Returns future<map>."
   [collection-name]
-  (future
-    (let [client   (require-client!)
-          param    (-> (DescribeCollectionParam/newBuilder)
-                       (.withCollectionName collection-name)
-                       .build)
-          response (check-response! (.describeCollection client param)
-                                    "describeCollection")
-          wrapper  (DescCollResponseWrapper. response)]
-      {:collection-name (.getCollectionName wrapper)
-       :fields          (mapv (fn [ft]
-                                {:name      (.getName ft)
-                                 :data-type (str (.getDataType ft))
-                                 :primary?  (.isPrimaryKey ft)
-                                 :auto-id?  (.isAutoID ft)})
-                              (.getFields wrapper))})))
+  (future (client/-describe (require-client!) collection-name)))
 
 (defn list-collections
-  "List all collection names. Returns a future resolving to a vector of strings."
+  "List all collection names. Returns future<vector<string>>."
   []
-  (future
-    (let [client   (require-client!)
-          param    (-> (ShowCollectionsParam/newBuilder) .build)
-          response (check-response! (.showCollections client param)
-                                    "showCollections")]
-      (vec (.getCollectionNamesList response)))))
+  (future (client/-list-collections (require-client!))))
 
 (defn drop-collection
-  "Drop (delete) a collection. Returns a future.
-   WARNING: This permanently deletes all data in the collection."
+  "Drop a collection. Returns future."
   [collection-name]
-  (future
-    (let [client (require-client!)
-          param  (-> (DropCollectionParam/newBuilder)
-                     (.withCollectionName collection-name)
-                     .build)]
-      (check-response! (.dropCollection client param) "dropCollection")
-      (log/info "Dropped collection:" collection-name)
-      {:collection-name collection-name :status :dropped})))
+  (future (client/-drop-collection (require-client!) collection-name)))
 
 (defn load-collection
-  "Load a collection into memory for search/query. Returns a future.
-   Milvus requires collections to be loaded before vector search."
+  "Load a collection into memory. Returns future."
   [collection-name]
-  (future
-    (let [client (require-client!)
-          param  (-> (LoadCollectionParam/newBuilder)
-                     (.withCollectionName collection-name)
-                     .build)]
-      (check-response! (.loadCollection client param) "loadCollection")
-      (log/info "Loaded collection:" collection-name))))
+  (future (client/-load-collection (require-client!) collection-name)))
 
 (defn release-collection
-  "Release a collection from memory. Returns a future.
-   Frees memory but collection must be reloaded before search."
+  "Release a collection from memory. Returns future."
   [collection-name]
-  (future
-    (let [client (require-client!)
-          param  (-> (ReleaseCollectionParam/newBuilder)
-                     (.withCollectionName collection-name)
-                     .build)]
-      (check-response! (.releaseCollection client param) "releaseCollection")
-      (log/info "Released collection:" collection-name))))
+  (future (client/-release-collection (require-client!) collection-name)))
 
 ;; ============================================================================
-;; Data operations (CRUD)
+;; Data operations (CRUD) — delegates to IMilvusCore
 ;; ============================================================================
-
-(defn- rows->columns
-  "Convert row-oriented data (vector of maps) to columnar format.
-   Milvus SDK v1 requires columnar insertion via InsertParam.Field.
-
-   Input:  [{:id \"1\" :content \"a\"} {:id \"2\" :content \"b\"}]
-   Output: {:id [\"1\" \"2\"] :content [\"a\" \"b\"]}"
-  [rows]
-  (when (seq rows)
-    (let [field-names (keys (first rows))]
-      (reduce (fn [acc field]
-                (assoc acc field (mapv #(clojure.core/get % field) rows)))
-              {}
-              field-names))))
-
-(defn- coerce-embedding
-  "Ensure embedding vector contains Java Float values for Milvus gRPC."
-  [v]
-  (when v (ArrayList. ^java.util.Collection (mapv float v))))
-
-(defn- ->insert-fields
-  "Convert columnar data map to list of InsertParam.Field objects.
-   Handles embedding coercion (vectors must be List<Float>)."
-  [columns]
-  (ArrayList.
-    ^java.util.Collection
-    (mapv (fn [[field-name values]]
-            (let [fname (name field-name)
-                  vals  (if (= fname "embedding")
-                          (ArrayList. ^java.util.Collection (mapv coerce-embedding values))
-                          (ArrayList. ^java.util.Collection values))]
-              (InsertParam$Field. fname vals)))
-          columns)))
 
 (defn add
-  "Insert or upsert records into a collection. Returns a future.
-
-   Records are row-oriented maps, converted to columnar format internally.
-   This mirrors the chroma/add API shape.
-
-   Options:
-     :upsert?   - if true, upsert instead of insert (default false)
-     :partition  - optional partition name (Milvus-specific)
-
-   Example:
-     @(add \"memories\"
-        [{:id \"entry-1\" :embedding [0.1 0.2 ...] :document \"hello\" :type \"note\"}
-         {:id \"entry-2\" :embedding [0.3 0.4 ...] :document \"world\" :type \"decision\"}]
-        :upsert? true)"
+  "Insert or upsert records. Returns future.
+   Options: :upsert? (default false), :partition."
   [collection-name records & {:keys [upsert? partition]
-                               :or   {upsert? false}}]
-  (future
-    (let [client  (require-client!)
-          columns (rows->columns records)
-          fields  (->insert-fields columns)]
+                              :or {upsert? false}}]
+  (let [opts {:partition partition}
+        cl   (require-client!)]
+    (future
       (if upsert?
-        (let [builder (doto (UpsertParam/newBuilder)
-                        (.withCollectionName collection-name)
-                        (.withFields fields))]
-          (when partition (.withPartitionName builder partition))
-          (let [resp (check-response! (.upsert client (.build builder)) "upsert")]
-            (log/debug "Upserted" (count records) "records into" collection-name)
-            {:count    (count records)
-             :mutation :upsert}))
-        (let [builder (doto (InsertParam/newBuilder)
-                        (.withCollectionName collection-name)
-                        (.withFields fields))]
-          (when partition (.withPartitionName builder partition))
-          (let [resp (check-response! (.insert client (.build builder)) "insert")]
-            (log/debug "Inserted" (count records) "records into" collection-name)
-            {:count    (count records)
-             :mutation :insert}))))))
+        (client/-upsert cl collection-name records opts)
+        (client/-insert cl collection-name records opts)))))
 
 (defn get
-  "Get records by IDs from a collection. Returns a future.
-
-   Uses scalar query with ID filter under the hood (Milvus pattern).
-   Analogous to chroma/get with :ids.
-
-   Options:
-     :include - set/vector of field names to return (default: all scalar fields)
-
-   Example:
-     @(get \"memories\" [\"entry-1\" \"entry-2\"] :include [\"content\" \"type\"])"
-  [collection-name ids & {:keys [include]}]
-  (future
-    (let [client     (require-client!)
-          id-expr    (str "id in ["
-                          (str/join ", " (map #(str "\"" % "\"") ids))
-                          "]")
-          out-fields (vec (or include
-                              ["id" "document" "type" "tags" "content"
-                               "content_hash" "created" "updated" "duration"
-                               "expires" "access_count" "helpful_count"
-                               "unhelpful_count" "project_id"]))
-          param      (-> (QueryParam/newBuilder)
-                         (.withCollectionName collection-name)
-                         (.withExpr id-expr)
-                         (.withOutFields (ArrayList. ^java.util.Collection out-fields))
-                         .build)
-          response   (check-response! (.query client param) "get")
-          wrapper    (QueryResultsWrapper. response)]
-      (mapv (fn [row]
-              (reduce (fn [m field]
-                        (assoc m (keyword field) (.get row field)))
-                      {}
-                      out-fields))
-            (.getRowRecords wrapper)))))
+  "Get records by IDs. Returns future<vec>.
+   Options: :include, :consistency-level."
+  [collection-name ids & {:keys [include consistency-level]
+                          :or {consistency-level :strong}}]
+  (let [opts {:include include :consistency-level consistency-level}]
+    (future (client/-get (require-client!) collection-name ids opts))))
 
 (defn delete
-  "Delete records by IDs from a collection. Returns a future.
-
-   Analogous to chroma/delete with :ids.
-
-   Options:
-     :partition - optional partition name
-
-   Example:
-     @(delete \"memories\" [\"entry-1\" \"entry-2\"])"
+  "Delete records by IDs. Returns future.
+   Options: :partition."
   [collection-name ids & {:keys [partition]}]
-  (future
-    (let [client  (require-client!)
-          id-expr (str "id in ["
-                       (str/join ", " (map #(str "\"" % "\"") ids))
-                       "]")
-          builder (doto (DeleteParam/newBuilder)
-                    (.withCollectionName collection-name)
-                    (.withExpr id-expr))]
-      (when partition (.withPartitionName builder partition))
-      (let [_resp (check-response! (.delete client (.build builder)) "delete")]
-        (log/debug "Deleted" (count ids) "records from" collection-name)
-        {:deleted (count ids)}))))
+  (let [opts {:partition partition}]
+    (future (client/-delete (require-client!) collection-name ids opts))))
 
 ;; ============================================================================
 ;; Search / Query
 ;; ============================================================================
 
 (defn query
-  "Vector similarity search. Returns a future.
-
-   This is the primary search operation, analogous to chroma/query.
-   Combines vector similarity with optional scalar filtering.
-
-   Required in opts:
-     :vector       - query vector (seq of numbers)
-
-   Optional in opts:
-     :limit         - max results (default 10)
-     :metric-type   - distance metric keyword (default :cosine)
-     :output-fields - fields to return (default: common scalar fields)
-     :filter        - boolean filter expression in Milvus syntax
-                      e.g. \"type == 'note'\"
-                      e.g. \"type in ['note', 'decision'] and project_id == 'hive-mcp'\"
-     :params        - search params map (e.g. {:ef 64} for HNSW)
-     :partition     - partition name
-
-   Example:
-     @(query \"memories\"
-        {:vector [0.1 0.2 ...]
-         :limit 10
-         :filter \"type == 'note'\"
-         :output-fields [\"id\" \"content\" \"type\"]})"
-  [collection-name {:keys [vector limit metric-type output-fields
-                           filter params partition]
-                    :or   {limit 10 metric-type :cosine}}]
-  (future
-    (let [client    (require-client!)
-          query-vec (coerce-embedding vector)
-          vectors   (ArrayList. ^java.util.Collection [query-vec])
-          out-fields (vec (or output-fields
-                              ["id" "document" "type" "tags" "content"
-                               "content_hash" "created" "updated" "project_id"]))
-          builder   (doto (SearchParam/newBuilder)
-                      (.withCollectionName collection-name)
-                      (.withFloatVectors vectors)
-                      (.withVectorFieldName "embedding")
-                      (.withTopK (int limit))
-                      (.withMetricType (idx/->metric-type metric-type))
-                      (.withOutFields (ArrayList. ^java.util.Collection out-fields)))]
-      (when filter    (.withExpr builder filter))
-      (when params    (.withParams builder (json/write-str params)))
-      (when partition (.withPartitionName builder partition))
-
-      (let [response  (check-response! (.search client (.build builder)) "search")
-            wrapper   (SearchResultsWrapper. (.getResults response))
-            id-scores (.getIDScore wrapper 0)]
-        (if (empty? id-scores)
-          []
-          ;; Fetch field data for each output field
-          (let [field-data (reduce
-                             (fn [acc field-name]
-                               (try
-                                 (assoc acc field-name
-                                        (vec (.getFieldData wrapper field-name 0)))
-                                 (catch Exception _e
-                                   ;; Field might not be in results
-                                   acc)))
-                             {}
-                             out-fields)
-                n (count id-scores)]
-            (mapv (fn [i]
-                    (let [score (.get id-scores i)
-                          base  {:id       (.getStrID score)
-                                 :distance (.getScore score)}]
-                      (reduce (fn [m [field-name values]]
-                                (if (< i (count values))
-                                  (assoc m (keyword field-name) (nth values i))
-                                  m))
-                              base
-                              field-data)))
-                  (range n))))))))
+  "Vector similarity search. Returns future<vec>.
+   See `milvus-clj.client/-query` for q-map shape."
+  [collection-name q-map]
+  (future (client/-query (require-client!) collection-name q-map)))
 
 (defn query-scalar
-  "Scalar (non-vector) query with filter expression. Returns a future.
-
-   This is for metadata-only queries without vector similarity.
-   Analogous to chroma/get with :where clauses.
-
-   Milvus filter syntax (differs from Chroma where-clause):
-     \"type == 'decision'\"
-     \"type in ['note', 'decision']\"
-     \"access_count > 5 and project_id == 'hive-mcp'\"
-     \"tags like '%migration%'\"
-
-   Options:
-     :filter        - boolean expression (required)
-     :output-fields - fields to return
-     :limit         - max results (default 100)
-     :partition     - partition name
-
-   Example:
-     @(query-scalar \"memories\"
-        {:filter \"type == 'decision' and project_id == 'hive-mcp'\"
-         :output-fields [\"id\" \"content\" \"type\"]
-         :limit 100})"
-  [collection-name {:keys [filter output-fields limit partition]
-                    :or   {limit 100}}]
-  (future
-    (let [client     (require-client!)
-          out-fields (vec (or output-fields
-                              ["id" "document" "type" "tags" "content"
-                               "content_hash" "created" "updated" "project_id"]))
-          builder    (doto (QueryParam/newBuilder)
-                       (.withCollectionName collection-name)
-                       (.withExpr filter)
-                       (.withOutFields (ArrayList. ^java.util.Collection out-fields))
-                       (.withLimit (long limit)))]
-      (when partition (.withPartitionName builder partition))
-      (let [response (check-response! (.query client (.build builder)) "query-scalar")
-            wrapper  (QueryResultsWrapper. response)]
-        (mapv (fn [row]
-                (reduce (fn [m field]
-                          (assoc m (keyword field) (.get row field)))
-                        {}
-                        out-fields))
-              (.getRowRecords wrapper))))))
+  "Scalar filter query. Returns future<vec>."
+  [collection-name q-map]
+  (future (client/-query-scalar (require-client!) collection-name q-map)))
 
 ;; ============================================================================
-;; Convenience operations
+;; Convenience / extras
 ;; ============================================================================
 
 (defn flush-collection
-  "Flush a collection to persist data to storage. Returns a future.
-   In Milvus 2.2+, data is auto-flushed, but explicit flush ensures durability."
+  "Flush collection to storage. Returns future."
   [collection-name]
-  (future
-    (let [client (require-client!)
-          param  (-> (FlushParam/newBuilder)
-                     (.withCollectionNames (ArrayList. ^java.util.Collection [collection-name]))
-                     .build)]
-      (check-response! (.flush client param) "flush")
-      (log/debug "Flushed collection:" collection-name))))
+  (future (client/-flush-collection (require-client!) collection-name)))
 
 (defn collection-stats
-  "Get basic statistics about a collection. Returns a future."
+  "Basic collection stats. Returns future<map>."
   [collection-name]
   (future
     (try
@@ -540,27 +215,11 @@
         {:error (str e)}))))
 
 (defn create-index
-  "Create an index on a collection field. Returns a future.
-   Typically called after collection creation if not done inline.
-
-   Example:
-     @(create-index \"memories\" milvus-clj.index/default-memory-index)"
+  "Create an index on a collection field. Returns future."
   [collection-name index-opts]
-  (future
-    (let [client    (require-client!)
-          idx-param (idx/create-index-param
-                      (assoc index-opts :collection-name collection-name))]
-      (check-response! (.createIndex client idx-param) "createIndex")
-      (log/info "Created index on" (:field-name index-opts) "for" collection-name)
-      {:collection-name collection-name
-       :field-name      (:field-name index-opts)
-       :status          :indexed})))
+  (future (client/-create-index (require-client!) collection-name index-opts)))
 
 (defn drop-index
-  "Drop an index from a collection field. Returns a future."
+  "Drop an index from a collection field. Returns future."
   [collection-name field-name]
-  (future
-    (let [client (require-client!)
-          param  (idx/drop-index-param collection-name field-name)]
-      (check-response! (.dropIndex client param) "dropIndex")
-      (log/info "Dropped index on" field-name "from" collection-name))))
+  (future (client/-drop-index (require-client!) collection-name field-name)))
