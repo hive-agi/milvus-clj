@@ -16,19 +16,33 @@
    :port                       (parse-long (or (System/getenv "MILVUS_PORT") "19530"))
    :collection-name            "hive-mcp-memory"
    :connect-timeout-ms         10000
-   ;; Keepalive budget is tuned for fragile intermediaries (tailscale
-   ;; userspace netstack, cloud NAT). 30 s ping is short enough that
-   ;; gVisor won't consider the flow idle (default idle TCP window is
-   ;; 60-120 s). keep-alive-without-calls? is the critical bit — without
-   ;; it gRPC only pings during active RPCs, so idle clients die silently
-   ;; and the first post-idle query sees "UNAVAILABLE: Keepalive failed".
-   :keep-alive-time-ms         30000
-   :keep-alive-timeout-ms      10000
+   ;; Keepalive budget tuned for tailscale userspace netstack (gVisor)
+   ;; and cloud NAT. 10 s ping (down from 30 s after empirical evidence
+   ;; that 30 s still loses races with gVisor's idle reaper). The
+   ;; without-calls? flag is the critical one — without it gRPC only
+   ;; pings during active RPCs, so idle clients die silently and the
+   ;; first post-idle query sees "UNAVAILABLE: Keepalive failed".
+   ;; If even 10 s leaks, switch the transport to :http via the
+   ;; client/make factory — HTTP has no idle state to lose.
+   :keep-alive-time-ms         10000
+   :keep-alive-timeout-ms      20000
    :keep-alive-without-calls?  true
    :idle-timeout-ms            86400000
    :secure                     false
    :token                      (System/getenv "MILVUS_TOKEN")
-   :database                   nil})
+   :database                   nil
+   ;; Transport selector — :grpc (legacy default) or :http.
+   ;; PR-3 hybrid: callers can opt in to :http via configure! or by
+   ;; passing :transport in the connect! opts map. The api.clj shim
+   ;; reads this and routes to the right nested {:transport :grpc/:http}
+   ;; shape for client/make.
+   :transport                  (if-let [t (System/getenv "MILVUS_TRANSPORT")]
+                                 (keyword t)
+                                 :grpc)
+   ;; HTTP-specific defaults — only consulted when :transport is :http.
+   :http-port                  9091
+   :http-request-timeout-ms    30000
+   :http-connect-timeout-ms    5000})
 
 ;; ---------------------------------------------------------------------------
 ;; State

@@ -42,36 +42,69 @@
   (or @default-client
       (throw (ex-info "Milvus client not connected. Call (connect!) first." {}))))
 
+(defn- flat->nested
+  "Map the legacy flat config shape onto the nested {:transport :grpc/:http}
+   shape that `client/make` expects.
+
+   PR-3 hybrid: the flat config carries a `:transport` selector (default
+   `:grpc`). For `:grpc` we populate the `:grpc` sub-map with all the
+   keepalive / idle / TLS knobs. For `:http` we populate the `:http`
+   sub-map and override `:port` from `:http-port` (REST is on 9091, not
+   gRPC's 19530, unless the caller explicitly passed `:port`)."
+  [flat]
+  (let [transport (or (:transport flat) :grpc)
+        common    {:transport transport
+                   :host      (:host flat)
+                   :token     (:token flat)
+                   :database  (:database flat)}]
+    (case transport
+      :http (assoc common
+                   :port (or (:port flat) (:http-port flat) 9091)
+                   :http {:request-timeout-ms (:http-request-timeout-ms flat)
+                          :connect-timeout-ms (:http-connect-timeout-ms flat)})
+      :grpc (assoc common
+                   :port (or (:port flat) 19530)
+                   :grpc {:connect-timeout-ms        (:connect-timeout-ms flat)
+                          :keep-alive-time-ms        (:keep-alive-time-ms flat)
+                          :keep-alive-timeout-ms     (:keep-alive-timeout-ms flat)
+                          :keep-alive-without-calls? (:keep-alive-without-calls? flat)
+                          :idle-timeout-ms           (:idle-timeout-ms flat)
+                          :secure                    (:secure flat)}))))
+
 (defn connect!
-  "Connect to Milvus using the gRPC transport. Preserved signature:
+  "Connect to Milvus using the configured transport.
+
+   Preserved signatures:
      (connect!)
      (connect! {:host \"milvus.prod\" :port 19530})
-   Merges opts into `milvus-clj.config` (legacy flat shape) and
-   constructs a `GrpcClient` via `milvus-clj.client/make`. Returns the
-   underlying `MilvusServiceClient` for backward compat — note that
-   callers holding the old raw client reference will still work, but
-   new code should use `milvus-clj.client/with-client` + protocol
-   methods instead."
+     (connect! {:transport :http :host \"milvus.prod\"})
+
+   Merges opts into `milvus-clj.config` (legacy flat shape), constructs
+   the appropriate transport-specific client via `milvus-clj.client/make`,
+   and stores it in the singleton `default-client` atom.
+
+   Returns the underlying transport-native client for backward compat:
+     - gRPC: the `MilvusServiceClient` instance (legacy callers may hold it)
+     - HTTP: the `HttpClient` defrecord (no legacy raw reference exists)
+
+   New code should use `milvus-clj.client/with-client` + protocol methods
+   directly instead of this singleton path."
   ([] (connect! {}))
   ([opts]
    (when (seq opts) (config/configure! opts))
-   (let [flat (config/get-config)
-         ;; Map the legacy flat config onto the new nested shape.
-         nested {:transport :grpc
-                 :host      (:host flat)
-                 :port      (:port flat)
-                 :token     (:token flat)
-                 :database  (:database flat)
-                 :grpc {:connect-timeout-ms        (:connect-timeout-ms flat)
-                        :keep-alive-time-ms        (:keep-alive-time-ms flat)
-                        :keep-alive-timeout-ms     (:keep-alive-timeout-ms flat)
-                        :keep-alive-without-calls? (:keep-alive-without-calls? flat)
-                        :idle-timeout-ms           (:idle-timeout-ms flat)
-                        :secure                    (:secure flat)}}
-         gc   ^milvus_clj.transport.grpc.GrpcClient (client/make nested)]
-     (reset! default-client gc)
-     ;; Legacy callers expect the raw MilvusServiceClient.
-     (:msc gc))))
+   (let [flat   (config/get-config)
+         nested (flat->nested flat)
+         c      (client/make nested)]
+     (reset! default-client c)
+     ;; Legacy callers (gRPC only) sometimes hold the raw MilvusServiceClient
+     ;; reference for advanced direct-SDK calls. After PR-3 the GrpcClient
+     ;; record holds the channel under an atom (so the recycler can swap it),
+     ;; so `connect!` derefs that atom for the historical return shape.
+     ;; For HTTP, return the record itself — there's no legacy code that
+     ;; holds the raw HttpClient reference.
+     (case (:transport nested)
+       :grpc @(:channel-atom c)
+       c))))
 
 (defn disconnect!
   "Close the active client and clear the singleton. Idempotent."

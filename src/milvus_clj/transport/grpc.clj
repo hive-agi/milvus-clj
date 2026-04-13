@@ -39,7 +39,8 @@
            [io.milvus.common.clientenum ConsistencyLevelEnum]
            [io.grpc StatusRuntimeException]
            [java.util ArrayList]
-           [java.util.concurrent TimeUnit]))
+           [java.util.concurrent
+            Executors ScheduledExecutorService TimeUnit]))
 
 ;; ============================================================================
 ;; Helpers (unchanged from legacy api.clj — behaviour-preserving move)
@@ -355,44 +356,13 @@
     (log/info "Dropped index on" field-name "from" collection-name)))
 
 ;; ============================================================================
-;; Record + open
+;; Channel construction (extracted so the recycler can rebuild on demand)
 ;; ============================================================================
 
-(defrecord GrpcClient [^MilvusServiceClient msc opts]
-  client/IMilvusCore
-  (-has-collection  [_ n]    (do-has-collection msc n))
-  (-load-collection [_ n]    (do-load-collection msc n))
-  (-insert       [_ n rs o]  (do-insert msc n rs o))
-  (-upsert       [_ n rs o]  (do-upsert msc n rs o))
-  (-delete       [_ n ids o] (do-delete msc n ids o))
-  (-get          [_ n ids o] (do-get msc n ids o))
-  (-query        [_ n q]     (do-query msc n q))
-  (-query-scalar [_ n q]     (do-query-scalar msc n q))
-  (-close [_]
-    (when msc
-      (try (.close msc) (catch Throwable _ nil))
-      (log/info "gRPC client closed")))
-
-  client/IMilvusAdmin
-  (-create-collection [_ n o] (do-create-collection msc n o))
-  (-drop-collection   [_ n]   (do-drop-collection msc n))
-  (-describe          [_ n]   (do-describe msc n))
-
-  client/IMilvusExtras
-  (-list-collections   [_]     (do-list-collections msc))
-  (-release-collection [_ n]   (do-release-collection msc n))
-  (-flush-collection   [_ n]   (do-flush-collection msc n))
-  (-create-index       [_ n o] (do-create-index msc n o))
-  (-drop-index         [_ n f] (do-drop-index msc n f)))
-
-(defn open
-  "Build a `GrpcClient` from the config map.
-
-   Reads agnostic keys (`:host`, `:port`, `:token`, `:database`) from the
-   top level and gRPC-specific keys from `(:grpc opts)`. Defaults mirror
-   the legacy `milvus-clj.config/default-config` shape for zero behavior
-   change when the compat shim calls this."
-  [opts]
+(defn- build-msc
+  "Build a fresh MilvusServiceClient from the gRPC sub-config + agnostic keys.
+   No state — pure factory. Called by `open` and by the recycler scheduler."
+  ^MilvusServiceClient [opts]
   (let [{:keys [host port token database]} opts
         grpc (:grpc opts)
         {:keys [connect-timeout-ms keep-alive-time-ms
@@ -415,9 +385,99 @@
                   (.withSecure (boolean secure)))]
     (when token    (.withToken builder token))
     (when database (.withDatabaseName builder database))
-    (let [msc (MilvusServiceClient. (.build builder))]
-      (log/info "gRPC client opened at" (str host ":" port))
-      (->GrpcClient msc opts))))
+    (MilvusServiceClient. (.build builder))))
+
+;; ============================================================================
+;; Record + open + recycler
+;; ============================================================================
+
+(defrecord GrpcClient [channel-atom ^ScheduledExecutorService scheduler opts]
+  client/IMilvusCore
+  (-has-collection  [_ n]    (do-has-collection @channel-atom n))
+  (-load-collection [_ n]    (do-load-collection @channel-atom n))
+  (-insert       [_ n rs o]  (do-insert @channel-atom n rs o))
+  (-upsert       [_ n rs o]  (do-upsert @channel-atom n rs o))
+  (-delete       [_ n ids o] (do-delete @channel-atom n ids o))
+  (-get          [_ n ids o] (do-get @channel-atom n ids o))
+  (-query        [_ n q]     (do-query @channel-atom n q))
+  (-query-scalar [_ n q]     (do-query-scalar @channel-atom n q))
+  (-close [_]
+    (when scheduler
+      (try (.shutdownNow scheduler) (catch Throwable _ nil)))
+    (when-let [^MilvusServiceClient msc @channel-atom]
+      (try (.close msc) (catch Throwable _ nil))
+      (reset! channel-atom nil))
+    (log/info "gRPC client closed"))
+
+  client/IMilvusAdmin
+  (-create-collection [_ n o] (do-create-collection @channel-atom n o))
+  (-drop-collection   [_ n]   (do-drop-collection @channel-atom n))
+  (-describe          [_ n]   (do-describe @channel-atom n))
+
+  client/IMilvusExtras
+  (-list-collections   [_]     (do-list-collections @channel-atom))
+  (-release-collection [_ n]   (do-release-collection @channel-atom n))
+  (-flush-collection   [_ n]   (do-flush-collection @channel-atom n))
+  (-create-index       [_ n o] (do-create-index @channel-atom n o))
+  (-drop-index         [_ n f] (do-drop-index @channel-atom n f)))
+
+(defn- recycle-channel!
+  "Build a fresh MilvusServiceClient, CAS-swap into the atom, schedule the
+   old one for close after a 10 s drain so any in-flight requests finish.
+   Called periodically by the recycler scheduler.
+
+   Why a drain delay: gRPC `.close` is graceful but in-flight RPCs hold
+   references to the old channel; closing immediately can race with a
+   call's response delivery. 10 s covers the worst-case Milvus query."
+  [channel-atom opts ^ScheduledExecutorService scheduler]
+  (try
+    (let [^MilvusServiceClient fresh (build-msc opts)
+          ^MilvusServiceClient stale (swap-vals! channel-atom (constantly fresh))]
+      (log/debug "Milvus channel recycled")
+      (.schedule scheduler
+                 ^Runnable (fn []
+                             (try
+                               (when stale (.close ^MilvusServiceClient (first stale)))
+                               (catch Throwable _)))
+                 10
+                 TimeUnit/SECONDS))
+    (catch Throwable e
+      (log/warn "Milvus channel recycle failed:" (.getMessage e)))))
+
+(defn open
+  "Build a `GrpcClient` from the config map.
+
+   Reads agnostic keys (`:host`, `:port`, `:token`, `:database`) from the
+   top level and gRPC-specific keys from `(:grpc opts)`.
+
+   Pool modes:
+     - `:pool :ephemeral` (default) — one channel for the record's
+       lifetime. The record is meant to be short-lived (per-batch via
+       `with-client`).
+     - `:pool :shared` — one channel kept alive for the JVM's lifetime,
+       periodically rebuilt via the recycler. Set `:recycle-ms` in
+       `(:grpc opts)` to enable; nil disables.
+
+   Stack 1 (the recycler) is dormant by default. Only used in
+   `:pool :shared` mode where it earns its keep — for ephemeral lifetimes
+   the record dies in seconds and the recycler would never fire."
+  [opts]
+  (let [grpc          (:grpc opts)
+        pool          (or (:pool grpc) :ephemeral)
+        recycle-ms    (when (= pool :shared) (:recycle-ms grpc))
+        channel-atom  (atom (build-msc opts))
+        scheduler     (when recycle-ms
+                        (Executors/newSingleThreadScheduledExecutor))]
+    (when scheduler
+      (.scheduleAtFixedRate ^ScheduledExecutorService scheduler
+                            ^Runnable #(recycle-channel! channel-atom opts scheduler)
+                            (long recycle-ms)
+                            (long recycle-ms)
+                            TimeUnit/MILLISECONDS)
+      (log/info "gRPC channel recycler armed, interval =" recycle-ms "ms"))
+    (log/info "gRPC client opened at" (str (:host opts) ":" (:port opts))
+              (str "(:pool " pool (when scheduler ", recycle-ms ") (when scheduler recycle-ms) ")"))
+    (->GrpcClient channel-atom scheduler opts)))
 
 ;; ============================================================================
 ;; Error classification — called by milvus-clj.client/classify-error
