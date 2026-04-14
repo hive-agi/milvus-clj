@@ -1,0 +1,6 @@
+{:strong "STRONG",
+ :bounded "BOUNDED",
+ :session "SESSION",
+ :eventually "EVENTUALLY",
+ :nil-input nil,
+ :unknown "STRONG"}

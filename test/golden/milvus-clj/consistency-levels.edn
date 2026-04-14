@@ -1,0 +1,5 @@
+{:keys (:bounded :eventually :session :strong),
+ :strong "STRONG",
+ :bounded "BOUNDED",
+ :session "SESSION",
+ :eventually "EVENTUALLY"}

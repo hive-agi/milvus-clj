@@ -1,0 +1,4 @@
+{:bounded "BOUNDED",
+ :eventually "EVENTUALLY",
+ :session "SESSION",
+ :strong "STRONG"}
