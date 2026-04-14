@@ -14,7 +14,7 @@
 
  :aliases
  {:dev  {:extra-paths ["dev" "test"]
-         :extra-deps  {nrepl/nrepl {:mvn/version "1.6.0"}
+         :extra-deps  {nrepl/nrepl {:mvn/version "1.7.0"}
                        cider/cider-nrepl {:mvn/version "0.58.0"}}}
   :test {:extra-paths ["test"]
          :extra-deps  {lambdaisland/kaocha {:mvn/version "1.91.1392"}}}}}
