@@ -10,11 +10,15 @@
         io.grpc/grpc-protobuf     {:mvn/version "1.80.0"}
         io.grpc/grpc-stub         {:mvn/version "1.80.0"}
         com.taoensso/timbre       {:mvn/version "6.8.0"}
-        org.clojure/data.json     {:mvn/version "2.5.1"}}
+        org.clojure/data.json     {:mvn/version "2.5.1"}
+
+        ;; Config DI — typed env var resolution with ADT backing
+        io.github.hive-agi/hive-di {:git/tag "v0.3.1" :git/sha "ab63fd0"}}
 
  :aliases
  {:dev  {:extra-paths ["dev" "test"]
          :extra-deps  {nrepl/nrepl {:mvn/version "1.7.0"}
                        cider/cider-nrepl {:mvn/version "0.58.0"}}}
   :test {:extra-paths ["test"]
-         :extra-deps  {lambdaisland/kaocha {:mvn/version "1.91.1392"}}}}}
+         :extra-deps  {lambdaisland/kaocha     {:mvn/version "1.91.1392"}
+                       org.clojure/test.check  {:mvn/version "1.1.1"}}}}}
