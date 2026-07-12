@@ -14,11 +14,13 @@
 ;; open / factory
 ;; ---------------------------------------------------------------------------
 
-(deftest open-defaults-port-to-9091
+(deftest open-defaults-port-to-19530
+  ;; Milvus 2.5+ multiplexes gRPC and the v2 REST API on 19530; 9091 is the
+  ;; metrics/health endpoint and 404s on every REST call. See config.clj.
   (let [c (http/open {:host "127.0.0.1" :http {}})]
     (try
-      (is (= 9091 (:port (:opts c)))
-          "HTTP default port must be 9091, not 19530")
+      (is (= 19530 (:port (:opts c)))
+          "HTTP default port must be 19530 (proxy multiplex), not 9091")
       (finally (client/-close c)))))
 
 (deftest open-preserves-explicit-port
