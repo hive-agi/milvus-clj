@@ -1,3 +1,7 @@
+;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
+;;
+;; SPDX-License-Identifier: MIT
+
 (ns milvus-clj.transport.grpc
   "gRPC transport for `milvus-clj.client`. Wraps `io.milvus/milvus-sdk-java`.
 

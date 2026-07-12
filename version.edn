@@ -1,0 +1,5 @@
+{:lib      io.github.hive-agi/milvus-clj
+ :minor    2
+ :license  {:name "MIT" :url "https://opensource.org/licenses/MIT"}
+ :scm-url  "https://github.com/hive-agi/milvus-clj"
+ :src-dirs ["src"]}
