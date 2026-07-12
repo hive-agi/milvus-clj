@@ -1,3 +1,7 @@
+;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
+;;
+;; SPDX-License-Identifier: MIT
+
 (ns milvus-clj.transport.http
   "HTTP/REST transport for `milvus-clj.client`. Talks Milvus v2.5.x REST API
    on port 19530 (yes, the same port as gRPC — Milvus 2.5+ multiplexes via

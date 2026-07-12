@@ -1,3 +1,7 @@
+;; Copyright (C) 2026 Pedro Gomes Branquinho (BuddhiLW) <pedrogbranquinho@gmail.com>
+;;
+;; SPDX-License-Identifier: MIT
+
 (ns milvus-clj.api
   "Legacy thin compat shim over `milvus-clj.client`.
 
