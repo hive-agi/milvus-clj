@@ -419,7 +419,17 @@
   (-release-collection [_ n]   (do-release-collection @channel-atom n))
   (-flush-collection   [_ n]   (do-flush-collection @channel-atom n))
   (-create-index       [_ n o] (do-create-index @channel-atom n o))
-  (-drop-index         [_ n f] (do-drop-index @channel-atom n f)))
+  (-drop-index         [_ n f] (do-drop-index @channel-atom n f))
+
+  client/ILivenessProbe
+  (-probe! [_]
+    ;; has-collection is the cheapest unary on the channel — single
+    ;; round-trip, no payload. The boolean return is irrelevant; what
+    ;; matters is that the call completes without IO failure. Throws
+    ;; on dead channel / unavailable, which is exactly the signal the
+    ;; resilience layer needs.
+    (do-has-collection @channel-atom "__milvus_clj_probe__")
+    true))
 
 (defn- recycle-channel!
   "Build a fresh MilvusServiceClient, CAS-swap into the atom, schedule the

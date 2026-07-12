@@ -389,7 +389,16 @@
   (-release-collection [_ _]   (extras-unavailable :release-collection))
   (-flush-collection   [_ _]   (extras-unavailable :flush-collection))
   (-create-index       [_ _ _] (extras-unavailable :create-index))
-  (-drop-index         [_ _ _] (extras-unavailable :drop-index)))
+  (-drop-index         [_ _ _] (extras-unavailable :drop-index))
+
+  client/ILivenessProbe
+  (-probe! [_]
+    ;; has-collection is the cheapest read-shaped REST call. Returns
+    ;; boolean on success (collection name is irrelevant here — the
+    ;; round-trip itself is the proof of life). IO failures bubble as
+    ;; ex-info tagged ::client/transport :http :cause :io.
+    (do-has-collection hc opts "__milvus_clj_probe__")
+    true))
 
 (defn open
   "Build an `HttpClient` from the config map.

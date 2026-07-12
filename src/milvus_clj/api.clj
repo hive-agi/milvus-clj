@@ -114,10 +114,47 @@
     (client/-close gc)
     (reset! default-client nil)))
 
-(defn connected?
-  "Check if the singleton client is set."
+(defonce ^:private probe-cache
+  ;; Tiny TTL cache so a burst of `connected?` calls amortises to one
+  ;; real RPC. :ts is the wall-clock of the last successful probe; a
+  ;; failed probe immediately invalidates so callers see the dead state.
+  (atom {:ts 0 :alive? false}))
+
+(def ^:private probe-cache-ttl-ms 5000)
+
+(defn invalidate-probe-cache!
+  "Force the next `connected?` call to re-probe. Hook for the resilience
+   layer to call after a reactive failure so the cache stays honest."
   []
-  (some? @default-client))
+  (swap! probe-cache assoc :ts 0 :alive? false))
+
+(defn connected?
+  "Real liveness check — verifies the singleton client can actually
+   reach the server, not merely that the atom holds a reference.
+
+   Caches a positive result for ~5s so a burst of consumer calls amortises
+   to one RPC. A negative result immediately invalidates the cache so the
+   resilience layer's reconnect loop sees the truth on its next poll.
+
+   Returns false (does NOT throw) on IO/fatal — callers reasoning about
+   liveness want a boolean, not an exception. The reactive retry path
+   (`with-auto-reconnect`) catches throws on the actual RPC site."
+  []
+  (let [c   @default-client
+        now (System/currentTimeMillis)
+        cur @probe-cache]
+    (cond
+      (nil? c)
+      false
+
+      (and (:alive? cur) (< (- now (:ts cur)) probe-cache-ttl-ms))
+      true
+
+      :else
+      (let [alive? (try (boolean (client/probe! c))
+                        (catch Throwable _ false))]
+        (reset! probe-cache {:ts now :alive? alive?})
+        alive?))))
 
 (defmacro with-connection
   "Execute body with a temporary Milvus connection that auto-disconnects.

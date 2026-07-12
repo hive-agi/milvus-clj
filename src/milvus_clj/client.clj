@@ -74,6 +74,40 @@
   (-create-index       [client collection-name index-opts])
   (-drop-index         [client collection-name field-name]))
 
+(defprotocol ILivenessProbe
+  "Single-method seam for transport-agnostic liveness verification.
+
+   Distinct from IMilvusCore on purpose (ISP): the resilience layer
+   (`hive-milvus.resilience.*`) probes connections without coupling to
+   data-plane operations it does not need. Each transport implements
+   `-probe!` with the cheapest RPC it can: HTTP HEAD, gRPC unary, etc.
+
+   Contract:
+     - Return truthy iff the server-side endpoint is reachable.
+     - Throw on transport-fatal failure so callers can classify via
+       `client/classify-error`. IO-class throws -> :connection-failure
+       (the resilience layer interprets this as 'still dead, keep
+       retrying'); fatal throws bubble up unchanged.
+     - MUST be idempotent and side-effect-free at the application level
+       (no writes, no state mutation in milvus). The only allowed side
+       effect is a single read-shaped RPC.
+
+   Default impl: callers fall back to `(-has-collection client \"__probe__\")`
+   for any IMilvusCore that does not extend ILivenessProbe."
+  (-probe! [client]
+    "Issue a minimal liveness RPC. Truthy on success; throws on IO."))
+
+(defn probe!
+  "Public helper. Calls `-probe!` if the client extends `ILivenessProbe`,
+   otherwise falls back to `(-has-collection client \"__milvus_clj_probe__\")`
+   so any transport implementing IMilvusCore can be probed.
+
+   Returns truthy on success, throws on IO/fatal."
+  [client]
+  (if (satisfies? ILivenessProbe client)
+    (-probe! client)
+    (-has-collection client "__milvus_clj_probe__")))
+
 ;; ============================================================================
 ;; Factory
 ;; ============================================================================
