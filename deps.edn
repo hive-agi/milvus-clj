@@ -24,6 +24,5 @@
                        org.clojure/test.check  {:mvn/version "1.1.1"}}}
 
   ;; Source-jar + Clojars deploy (reads coords from version.edn).
-  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.9"}
-                 slipset/deps-deploy {:mvn/version "0.2.2"}}
-          :ns-default build}}}
+  :build {:deps {io.github.hive-agi/hive-build {:mvn/version "0.1.0"}}
+          :ns-default hive-build.api}}}
