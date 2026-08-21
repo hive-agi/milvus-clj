@@ -1,5 +1,5 @@
 {:paths ["src" "resources"]
- :deps {org.clojure/clojure       {:mvn/version "1.12.0"}
+ :deps {org.clojure/clojure       {:mvn/version "1.12.5"}
         io.milvus/milvus-sdk-java {:mvn/version "2.6.17"}
         ;; milvus-sdk-java grpc stubs require protobuf 4.x at runtime
         ;; (MapField must implement MapFieldReflectionAccessor)
@@ -10,7 +10,7 @@
         io.grpc/grpc-protobuf     {:mvn/version "1.80.0"}
         io.grpc/grpc-stub         {:mvn/version "1.80.0"}
         com.taoensso/timbre       {:mvn/version "6.8.0"}
-        org.clojure/data.json     {:mvn/version "2.5.1"}
+        org.clojure/data.json     {:mvn/version "2.5.2"}
 
         ;; Config DI — typed env var resolution with ADT backing
         io.github.hive-agi/hive-di {:mvn/version "0.4.2"}}
@@ -21,7 +21,7 @@
                        cider/cider-nrepl {:mvn/version "0.62.2"}}}
   :test {:extra-paths ["test"]
          :extra-deps  {lambdaisland/kaocha     {:mvn/version "1.91.1392"}
-                       org.clojure/test.check  {:mvn/version "1.1.1"}}}
+                       org.clojure/test.check  {:mvn/version "1.1.3"}}}
 
   ;; Source-jar + Clojars deploy (reads coords from version.edn).
   :build {:deps {io.github.hive-agi/hive-build {:mvn/version "0.1.8"}}
