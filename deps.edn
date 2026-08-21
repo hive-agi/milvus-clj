@@ -1,6 +1,6 @@
 {:paths ["src" "resources"]
  :deps {org.clojure/clojure       {:mvn/version "1.12.5"}
-        io.milvus/milvus-sdk-java {:mvn/version "2.6.17"}
+        io.milvus/milvus-sdk-java {:mvn/version "3.0.7"}
         ;; milvus-sdk-java grpc stubs require protobuf 4.x at runtime
         ;; (MapField must implement MapFieldReflectionAccessor)
         com.google.protobuf/protobuf-java {:mvn/version "4.36.0"}
