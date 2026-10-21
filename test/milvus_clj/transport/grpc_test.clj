@@ -7,7 +7,8 @@
    the file exists at the path the PR plan promises."
   (:require [clojure.test :refer [deftest is]]
             [milvus-clj.client :as client]
-            [milvus-clj.transport.grpc :as grpc]))
+            [milvus-clj.transport.grpc :as grpc]
+            [milvus-clj.conformance :as conf]))
 
 (defn- grpc-reachable? []
   (try
@@ -16,10 +17,20 @@
       true)
     (catch Throwable _ false)))
 
+(deftest grpc-client-type-implements-the-protocols
+  ;; Offline half of the factory check: the type `make` builds for :grpc
+  ;; implements every protocol, without opening a channel.
+  (let [cls (Class/forName "milvus_clj.transport.grpc.GrpcClient")]
+    (is (extends? client/IMilvusCore cls))
+    (is (extends? client/IMilvusAdmin cls))
+    (is (extends? client/IMilvusExtras cls))))
+
 (deftest factory-dispatches-to-grpc
   ;; MilvusServiceClient's constructor eagerly opens the channel and
-  ;; blocks for ~10 s if unreachable. Skip unless a server is listening.
-  (when (grpc-reachable?)
+  ;; blocks for ~10 s if unreachable. Live only: MILVUS_LIVE_TESTS set and
+  ;; a server listening.
+  (if-not (and (conf/live-tests-enabled?) (grpc-reachable?))
+    (conf/skip! "grpc factory dispatch")
     (let [c (client/make {:transport :grpc
                           :host "127.0.0.1"
                           :port 19530
