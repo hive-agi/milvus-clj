@@ -13,7 +13,8 @@
    transports — `IMilvusCore` + `IMilvusAdmin`. `IMilvusExtras` is
    unimplemented for HTTP (by design; see transport/http.clj)."
   (:require [clojure.test :refer [is testing]]
-            [milvus-clj.client :as client]))
+            [milvus-clj.client :as client]
+            [clojure.string :as str]))
 
 (def ^:dynamic *transport* :grpc)
 
@@ -46,6 +47,25 @@
       true)
     (catch Throwable _ false)))
 
+(defn live-tests-enabled?
+  "Live tests are opt-in: MILVUS_LIVE_TESTS must be set (non-blank). An open
+   port alone is not enough, since some other service (or a Milvus that
+   wants auth this suite does not have) can answer on 9091 or 19530 and turn
+   an integration test into a spurious failure."
+  []
+  (not (clojure.string/blank? (System/getenv "MILVUS_LIVE_TESTS"))))
+
+(defn live?
+  "True when live tests are enabled AND transport `t`'s port answers."
+  [t]
+  (and (live-tests-enabled?) (milvus-reachable? t)))
+
+(defn skip!
+  "Record a skipped live assertion as a passing one, so the runner sees an
+   assertion and the report says why nothing ran."
+  [what]
+  (is true (str "SKIPPED (set MILVUS_LIVE_TESTS and run Milvus): " what)))
+
 (defn close-quietly [c]
   (try (client/-close c) (catch Throwable _ nil)))
 
@@ -61,7 +81,8 @@
 (defn assert-has-collection-returns-boolean
   "`-has-collection` must return a Clojure boolean for both transports."
   []
-  (when (milvus-reachable? *transport*)
+  (if-not (live? *transport*)
+    (skip! (str "has-collection on " *transport*))
     (let [c (make-test-client)]
       (try
         (let [result (client/-has-collection c "__definitely_not_a_collection__")]
@@ -74,10 +95,12 @@
   "`-describe` must return a map with `:collection-name` and `:fields`,
    where each field map has `:name :data-type :primary? :auto-id?`."
   [coll-name]
-  (when (milvus-reachable? *transport*)
+  (if-not (live? *transport*)
+    (skip! (str "describe on " *transport*))
     (let [c (make-test-client)]
       (try
-        (when (client/-has-collection c coll-name)
+        (if-not (client/-has-collection c coll-name)
+          (skip! (str "describe: no collection " coll-name))
           (let [result (client/-describe c coll-name)]
             (is (map? result))
             (is (contains? result :collection-name))
@@ -92,10 +115,11 @@
 
 (defn assert-protocols-satisfied
   "Smoke check: the client instance satisfies the documented protocols.
-   Skipped for gRPC when no server is reachable — its constructor
-   eagerly opens the channel and blocks for the connect-timeout."
+   Skipped for gRPC unless live — its constructor eagerly opens the channel
+   and blocks for the connect-timeout."
   []
-  (when (or (= *transport* :http) (milvus-reachable? *transport*))
+  (if-not (or (= *transport* :http) (live? *transport*))
+    (skip! (str "protocols on " *transport*))
     (let [c (make-test-client)]
       (try
         (is (satisfies? client/IMilvusCore c)

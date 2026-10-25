@@ -2,4 +2,5 @@
  :parent "hive"
  :description "Milvus vector database Clojure client"
  :language :clojure
- :tags ["milvus" "vector-db"]}
+ :tags ["milvus" "vector-db"] 
+ :carto {:source-roots ["dev" "resources" "src" "test"]}}
